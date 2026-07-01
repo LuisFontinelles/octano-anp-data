@@ -52,7 +52,7 @@ jobs:
           username: ${{ env.MAIL_USERNAME }}
           password: ${{ env.MAIL_APP_PASSWORD }}
           subject: "[octano] Falha ao atualizar a base da ANP"
-          to: luisffontinelles@gmail.com
+          to: luiaffontinelles@gmail.com
           from: octano bot <${{ env.MAIL_USERNAME }}>
           body: |
             A atualização semanal da base da ANP falhou.

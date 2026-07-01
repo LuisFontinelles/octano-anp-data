@@ -10,7 +10,7 @@ Toda segunda-feira às 06:00 (horário de Brasília), uma GitHub Action:
 2. Valida o formato (header e quantidade mínima de linhas) e converte para CSV no formato que o app consome;
 3. Publica `base_anp.csv` e `metadata.json` na release [`latest`](../../releases/tag/latest), substituindo os arquivos anteriores.
 
-Se qualquer passo falhar, o workflow falha e o GitHub envia e-mail automaticamente para o dono do repositório. Opcionalmente, configurando os secrets `MAIL_USERNAME` e `MAIL_APP_PASSWORD` (senha de app do Gmail), um e-mail extra é enviado para luisffontinelles@gmail.com.
+Se qualquer passo falhar, o workflow falha e o GitHub envia e-mail automaticamente para o dono do repositório. Opcionalmente, configurando os secrets `MAIL_USERNAME` e `MAIL_APP_PASSWORD` (senha de app do Gmail), um e-mail extra é enviado para luiaffontinelles@gmail.com.
 
 ## URLs que o app consome
 
