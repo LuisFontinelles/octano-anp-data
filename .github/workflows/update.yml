@@ -1,0 +1,63 @@
+name: Atualizar base ANP
+
+on:
+  schedule:
+    # Toda segunda-feira às 06:00 de Brasília (09:00 UTC)
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Baixar e converter dados da ANP
+        run: python scripts/update_anp.py
+
+      - name: Publicar na release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATA_HOJE=$(date -u +%d/%m/%Y)
+          gh release upload latest data/base_anp.csv data/metadata.json \
+            --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit latest \
+            --title "Base ANP" \
+            --notes "Dados de fiscalização da ANP baixados em $DATA_HOJE. Fonte: Painel Dinâmico da Fiscalização do Abastecimento (SFI/ANP)." \
+            --repo "$GITHUB_REPOSITORY"
+
+      # Além deste passo, o GitHub já envia e-mail automaticamente ao dono do
+      # repositório quando um workflow agendado falha. Este passo só roda se os
+      # secrets MAIL_USERNAME e MAIL_APP_PASSWORD estiverem configurados.
+      - name: Avisar falha por e-mail
+        if: ${{ failure() && env.MAIL_APP_PASSWORD != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ env.MAIL_USERNAME }}
+          password: ${{ env.MAIL_APP_PASSWORD }}
+          subject: "[octano] Falha ao atualizar a base da ANP"
+          to: luisffontinelles@gmail.com
+          from: octano bot <${{ env.MAIL_USERNAME }}>
+          body: |
+            A atualização semanal da base da ANP falhou.
+
+            Veja o log da execução:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            O app continua funcionando com a última base publicada.
