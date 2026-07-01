@@ -25,6 +25,12 @@ SOURCE_URL = (
     "dados-fisc-a-partir-2019.xlsx"
 )
 
+# API pública de revendedores da ANP: cadastro oficial com CNPJ, razão social,
+# bandeira e COORDENADAS de cada posto — usada pelo app para validar
+# geograficamente o cruzamento Google ⇄ ANP.
+CADASTRO_API = "https://revendedoresapi.anp.gov.br/v1/combustivel?numeropagina={page}"
+CADASTRO_MIN_ROWS = 30_000  # a base tem ~46 mil postos; menos que isso é problema
+
 EXPECTED_HEADER = [
     "UF",
     "Município",
@@ -59,6 +65,47 @@ def format_cell(value, is_date_column: bool) -> str:
     # O parser de CSV do app é linha-a-linha e não trata aspas escapadas:
     # remove quebras de linha e aspas duplas de dentro das células.
     return text.replace("\r", " ").replace("\n", " ").replace('"', "'").strip()
+
+
+def fetch_cadastro() -> bytes:
+    """Baixa o cadastro completo de postos da API de revendedores (paginada,
+    5.000 registros por página) e devolve um CSV `;`-separado com CNPJ,
+    razão social, bandeira, UF, município, latitude e longitude."""
+    lines = ["CNPJ;RAZAOSOCIAL;BANDEIRA;UF;MUNICIPIO;LATITUDE;LONGITUDE"]
+    count = 0
+    page = 1
+    while page <= 30:  # trava de segurança: hoje são ~10 páginas
+        url = CADASTRO_API.format(page=page)
+        print(f"Cadastro: página {page}...")
+        request = urllib.request.Request(url, headers={
+            "User-Agent": "octano-anp-data/1.0", "Accept": "application/json",
+        })
+        with urllib.request.urlopen(request, timeout=300) as response:
+            payload = json.loads(response.read())
+        rows = payload.get("data") or []
+        if not rows:
+            break
+        for row in rows:
+            def clean(value):
+                return str(value or "").replace(";", ",").replace("\n", " ").strip()
+            lines.append(";".join([
+                clean(row.get("cnpj")),
+                clean(row.get("razaoSocial")),
+                clean(row.get("distribuidora")),
+                clean(row.get("uf")),
+                clean(row.get("municipio")),
+                clean(row.get("latitude")),
+                clean(row.get("longitude")),
+            ]))
+            count += 1
+        page += 1
+
+    print(f"Cadastro: {count} postos")
+    if count < CADASTRO_MIN_ROWS:
+        raise RuntimeError(
+            f"Cadastro com apenas {count} postos (mínimo {CADASTRO_MIN_ROWS}) — abortando"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def main() -> None:
@@ -105,6 +152,9 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "base_anp.csv").write_bytes(csv_bytes)
 
+    cadastro_bytes = fetch_cadastro()
+    (DATA_DIR / "cadastro_postos.csv").write_bytes(cadastro_bytes)
+
     now = datetime.now(timezone.utc)
     metadata = {
         "updatedAt": now.strftime("%Y-%m-%d"),
@@ -112,11 +162,17 @@ def main() -> None:
         "rows": count,
         "sha256": hashlib.sha256(csv_bytes).hexdigest(),
         "source": SOURCE_URL,
+        "cadastroRows": cadastro_bytes.count(b"\n") - 1,
+        "cadastroSha256": hashlib.sha256(cadastro_bytes).hexdigest(),
+        "cadastroSource": "https://revendedoresapi.anp.gov.br/v1/combustivel",
     }
     (DATA_DIR / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    print(f"OK: data/base_anp.csv ({len(csv_bytes)/1e6:.1f} MB) e data/metadata.json gravados")
+    print(
+        f"OK: base_anp.csv ({len(csv_bytes)/1e6:.1f} MB), "
+        f"cadastro_postos.csv ({len(cadastro_bytes)/1e6:.1f} MB) e metadata.json gravados"
+    )
 
 
 if __name__ == "__main__":

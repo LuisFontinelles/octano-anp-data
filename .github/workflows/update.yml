@@ -33,7 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DATA_HOJE=$(date -u +%d/%m/%Y)
-          gh release upload latest data/base_anp.csv data/metadata.json \
+          gh release upload latest data/base_anp.csv data/cadastro_postos.csv data/metadata.json \
             --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit latest \
             --title "Base ANP" \
