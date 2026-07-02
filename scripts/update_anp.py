@@ -79,6 +79,17 @@ PRECOS_PROD_MIN_ROWS = 3_000
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
+def mask_cpf(value: str) -> str:
+    """Mascara CPFs de revendedores pessoa física (LGPD): a coluna da ANP é
+    "CNPJ/CPF" e ~1.200 registros trazem CPF completo. CNPJ (14 dígitos, dado
+    de empresa) passa intacto; CPF (11 dígitos) mantém só os 6 dígitos do
+    meio — suficiente para conferência, sem redistribuir o documento."""
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if len(digits) == 11:
+        return f"***{digits[3:9]}**"
+    return value
+
+
 def format_cell(value, is_date_column: bool) -> str:
     if value is None:
         return ""
@@ -275,6 +286,7 @@ def main() -> None:
         )
 
     date_index = EXPECTED_HEADER.index("DATA DO DF")
+    doc_index = EXPECTED_HEADER.index("CNPJ/CPF")
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     writer.writerow(EXPECTED_HEADER)
@@ -285,9 +297,11 @@ def main() -> None:
             continue
         cells = list(row[: len(EXPECTED_HEADER)])
         cells += [None] * (len(EXPECTED_HEADER) - len(cells))
-        writer.writerow(
+        formatted = [
             format_cell(cell, index == date_index) for index, cell in enumerate(cells)
-        )
+        ]
+        formatted[doc_index] = mask_cpf(formatted[doc_index])
+        writer.writerow(formatted)
         count += 1
 
     print(f"Convertidas {count} linhas")
