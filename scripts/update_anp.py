@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import sys
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,10 +147,25 @@ def fetch_cadastro() -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def download(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "octano-anp-data/1.0"})
-    with urllib.request.urlopen(request, timeout=300) as response:
-        return response.read()
+def download(url: str, attempts: int = 4) -> bytes:
+    """Download com retry exponencial: o gov.br falha de forma transitória
+    com alguma frequência ("Network is unreachable") e o workflow é semanal —
+    melhor insistir alguns minutos do que falhar a atualização inteira."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "octano-anp-data/1.0"}
+            )
+            with urllib.request.urlopen(request, timeout=300) as response:
+                return response.read()
+        except Exception as error:  # noqa: BLE001 - urllib levanta tipos variados
+            last_error = error
+            if attempt < attempts:
+                wait = 30 * attempt
+                print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
+                time.sleep(wait)
+    raise RuntimeError(f"Download falhou após {attempts} tentativas: {last_error}")
 
 
 def fetch_precos_distribuicao() -> bytes:
