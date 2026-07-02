@@ -33,11 +33,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DATA_HOJE=$(date -u +%d/%m/%Y)
-          gh release upload latest data/base_anp.csv data/cadastro_postos.csv data/metadata.json \
+          gh release upload latest data/base_anp.csv data/cadastro_postos.csv \
+            data/precos_distribuicao.csv data/precos_produtores.csv data/metadata.json \
             --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit latest \
             --title "Base ANP" \
-            --notes "Dados de fiscalização da ANP baixados em $DATA_HOJE. Fonte: Painel Dinâmico da Fiscalização do Abastecimento (SFI/ANP)." \
+            --notes "Dados da ANP baixados em $DATA_HOJE: fiscalização (SFI), cadastro de revendedores e preços semanais de distribuição e de produtores/importadores (SDL)." \
             --repo "$GITHUB_REPOSITORY"
 
       # Além deste passo, o GitHub já envia e-mail automaticamente ao dono do
