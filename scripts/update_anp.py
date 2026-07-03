@@ -93,6 +93,17 @@ PRODUTORES_PRODUTOS = (
 )
 PRECOS_PROD_MIN_ROWS = 3_000
 
+# --- Reclamações Fundamentadas (PowerBI público do Procon-SP):           ---
+# --- CNPJs de empresas com reclamações de consumidores procedentes.      ---
+# Dashboard: https://www.procon.sp.gov.br/empresas-reclamadas/
+# A chave pública do relatório é estável enquanto o IPEM não republicar.
+RECLAMADAS_POWERBI_URL = (
+    "https://wabi-brazil-south-b-primary-api.analysis.windows.net/"
+    "public/reports/querydata?synchronous=true"
+)
+RECLAMADAS_RESOURCE_KEY = "7f552da0-bf9d-4c97-be36-fbea30e0dd3d"
+RECLAMADAS_MIN_CNPJS = 100  # hoje são ~30 mil; menos que isso é problema
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -254,6 +265,143 @@ def fetch_procon_sp(cadastro_cnpjs: set) -> bytes:
         time.sleep(0.1)
 
     print(f"Procon-SP: {count} processos de {len(selected)} postos")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _normalize_cnpj(raw: str) -> str:
+    """Normaliza um CNPJ vindo do PowerBI: remove formatação, preenche com
+    zeros à esquerda até 14 dígitos. Retorna string vazia se inválido."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits or len(digits) > 14:
+        return ""
+    return digits.zfill(14)
+
+
+def fetch_reclamadas_procon_sp() -> bytes:
+    """Extrai CNPJs de empresas reclamadas do PowerBI público do Procon-SP
+    (Reclamações Fundamentadas). O dashboard lista empresas que tiveram
+    reclamações de consumidores registradas e julgadas procedentes.
+
+    Devolve um CSV simples: CNPJ (uma coluna, um CNPJ normalizado por linha).
+    Fonte: https://www.procon.sp.gov.br/empresas-reclamadas/"""
+    payload_body = json.dumps({
+        "version": "1.0.0",
+        "queries": [{
+            "Query": {
+                "Commands": [{
+                    "SemanticQueryDataShapeCommand": {
+                        "Query": {
+                            "Version": 2,
+                            "From": [
+                                {"Name": "a", "Entity": "account", "Type": 0},
+                                {"Name": "l", "Entity": "LocalDateTable_3e2b530b-07af-4a31-b354-af98b95ab3c9", "Type": 0},
+                            ],
+                            "Select": [{
+                                "Column": {
+                                    "Expression": {"SourceRef": {"Source": "a"}},
+                                    "Property": "CNPJ",
+                                },
+                                "Name": "account.CNPJ",
+                            }],
+                            "Where": [
+                                {"Condition": {"Not": {"Expression": {"In": {
+                                    "Expressions": [{"Column": {
+                                        "Expression": {"SourceRef": {"Source": "a"}},
+                                        "Property": "CNPJ",
+                                    }}],
+                                    "Values": [[{"Literal": {"Value": "null"}}]],
+                                }}}}},
+                                {"Condition": {"In": {
+                                    "Expressions": [{"Column": {
+                                        "Expression": {"SourceRef": {"Source": "l"}},
+                                        "Property": "Ano",
+                                    }}],
+                                    "Values": [[{"Literal": {"Value": "2025L"}}]],
+                                }}},
+                            ],
+                        },
+                        "Binding": {
+                            "Primary": {"Groupings": [{"Projections": [0]}]},
+                            "DataReduction": {
+                                "DataVolume": 3,
+                                "Primary": {"Window": {"Count": 30000}},
+                            },
+                            "Version": 1,
+                        },
+                        "ExecutionMetricsKind": 1,
+                    }
+                }]
+            },
+            "QueryId": "",
+            "ApplicationContext": {
+                "DatasetId": "5410ab72-d62e-4976-bf13-c8039a70b5ee",
+                "Sources": [{
+                    "ReportId": "98fdc96d-085b-4ca1-ac68-d29bfed78e8f",
+                    "VisualId": "3e04fd14718d00c9ce9d",
+                }],
+            },
+        }],
+        "cancelQueries": [],
+        "modelId": 3819509,
+    }).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "X-PowerBI-ResourceKey": RECLAMADAS_RESOURCE_KEY,
+        "User-Agent": "octano-anp-data/1.0",
+        "Origin": "https://app.powerbi.com",
+        "Referer": "https://app.powerbi.com/",
+    }
+
+    print("Reclamadas Procon-SP (PowerBI): baixando...")
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                RECLAMADAS_POWERBI_URL,
+                data=payload_body,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = json.loads(response.read())
+            break
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            if attempt < 3:
+                wait = 15 * attempt
+                print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
+                time.sleep(wait)
+    else:
+        raise RuntimeError(
+            f"PowerBI Reclamadas falhou após 3 tentativas: {last_error}"
+        )
+
+    # Navega a estrutura DSR do PowerBI para extrair os CNPJs do campo "G0"
+    cnpjs: set[str] = set()
+    try:
+        results = data["results"][0]["result"]["data"]["dsr"]["DS"][0]["PH"]
+        for group in results:
+            rows = group.get("DM0", [])
+            for row in rows:
+                raw = row.get("G0", "")
+                if raw:
+                    normalized = _normalize_cnpj(str(raw))
+                    if normalized and len(normalized) == 14:
+                        cnpjs.add(normalized)
+    except (KeyError, IndexError, TypeError) as err:
+        raise RuntimeError(
+            f"Estrutura do PowerBI mudou — não foi possível extrair CNPJs: {err}"
+        ) from err
+
+    print(f"Reclamadas Procon-SP: {len(cnpjs)} CNPJs extraídos")
+    if len(cnpjs) < RECLAMADAS_MIN_CNPJS:
+        raise RuntimeError(
+            f"Apenas {len(cnpjs)} CNPJs reclamados (mínimo {RECLAMADAS_MIN_CNPJS}) — abortando"
+        )
+
+    lines = ["CNPJ"] + sorted(cnpjs)
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -445,6 +593,24 @@ def main() -> None:
         procon_bytes or b"CNPJ;RAZAO_SOCIAL;PROCESSO;STATUS;VALOR_MULTA\n"
     )
 
+    # Reclamações Fundamentadas (PowerBI): falha SUAVE, mesmo padrão do Procon.
+    try:
+        reclamadas_bytes = fetch_reclamadas_procon_sp()
+    except Exception as error:  # noqa: BLE001
+        print(f"AVISO: Reclamadas Procon-SP indisponível ({error}); reutilizando a última versão")
+        try:
+            reclamadas_bytes = download(
+                "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
+                "latest/reclamadas_procon_sp.csv",
+                attempts=2,
+            )
+        except Exception as fallback_error:  # noqa: BLE001
+            print(f"AVISO: fallback das Reclamadas também falhou ({fallback_error})")
+            reclamadas_bytes = None
+    (DATA_DIR / "reclamadas_procon_sp.csv").write_bytes(
+        reclamadas_bytes or b"CNPJ\n"
+    )
+
     precos_dist_bytes = fetch_precos_distribuicao()
     (DATA_DIR / "precos_distribuicao.csv").write_bytes(precos_dist_bytes)
 
@@ -473,6 +639,12 @@ def main() -> None:
         metadata["proconSource"] = (
             "https://sistemas.procon.sp.gov.br/transparencia/empresas_autuadas/"
         )
+    if reclamadas_bytes:
+        metadata["reclamadasRows"] = reclamadas_bytes.count(b"\n") - 1
+        metadata["reclamadasSha256"] = hashlib.sha256(reclamadas_bytes).hexdigest()
+        metadata["reclamadasSource"] = (
+            "https://www.procon.sp.gov.br/empresas-reclamadas/"
+        )
     (DATA_DIR / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -481,7 +653,8 @@ def main() -> None:
         f"cadastro_postos.csv ({len(cadastro_bytes)/1e6:.1f} MB), "
         f"precos_distribuicao.csv ({len(precos_dist_bytes)/1e6:.1f} MB), "
         f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB), "
-        f"procon_sp.csv ({len(procon_bytes or b'')/1e3:.0f} KB) "
+        f"procon_sp.csv ({len(procon_bytes or b'')/1e3:.0f} KB), "
+        f"reclamadas_procon_sp.csv ({len(reclamadas_bytes or b'')/1e3:.0f} KB) "
         f"e metadata.json gravados"
     )
 
