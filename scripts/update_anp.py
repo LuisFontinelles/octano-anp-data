@@ -430,12 +430,20 @@ def main() -> None:
         procon_bytes = fetch_procon_sp(cadastro_cnpjs)
     except Exception as error:  # noqa: BLE001
         print(f"AVISO: Procon-SP indisponível ({error}); reutilizando a última versão")
-        procon_bytes = download(
-            "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
-            "latest/procon_sp.csv",
-            attempts=2,
-        )
-    (DATA_DIR / "procon_sp.csv").write_bytes(procon_bytes)
+        try:
+            procon_bytes = download(
+                "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
+                "latest/procon_sp.csv",
+                attempts=2,
+            )
+        except Exception as fallback_error:  # noqa: BLE001
+            # Nem coleta nem fallback: publica só o header e OMITE o sha do
+            # metadata — o app mantém o que já tem e nada derruba a ANP.
+            print(f"AVISO: fallback do Procon-SP também falhou ({fallback_error})")
+            procon_bytes = None
+    (DATA_DIR / "procon_sp.csv").write_bytes(
+        procon_bytes or b"CNPJ;RAZAO_SOCIAL;PROCESSO;STATUS;VALOR_MULTA\n"
+    )
 
     precos_dist_bytes = fetch_precos_distribuicao()
     (DATA_DIR / "precos_distribuicao.csv").write_bytes(precos_dist_bytes)
@@ -453,15 +461,18 @@ def main() -> None:
         "cadastroRows": cadastro_bytes.count(b"\n") - 1,
         "cadastroSha256": hashlib.sha256(cadastro_bytes).hexdigest(),
         "cadastroSource": "https://revendedoresapi.anp.gov.br/v1/combustivel",
-        "proconRows": procon_bytes.count(b"\n") - 1,
-        "proconSha256": hashlib.sha256(procon_bytes).hexdigest(),
-        "proconSource": "https://sistemas.procon.sp.gov.br/transparencia/empresas_autuadas/",
         "precosDistRows": precos_dist_bytes.count(b"\n") - 1,
         "precosDistSha256": hashlib.sha256(precos_dist_bytes).hexdigest(),
         "precosProdRows": precos_prod_bytes.count(b"\n") - 1,
         "precosProdSha256": hashlib.sha256(precos_prod_bytes).hexdigest(),
         "precosSource": "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos",
     }
+    if procon_bytes:
+        metadata["proconRows"] = procon_bytes.count(b"\n") - 1
+        metadata["proconSha256"] = hashlib.sha256(procon_bytes).hexdigest()
+        metadata["proconSource"] = (
+            "https://sistemas.procon.sp.gov.br/transparencia/empresas_autuadas/"
+        )
     (DATA_DIR / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -470,7 +481,7 @@ def main() -> None:
         f"cadastro_postos.csv ({len(cadastro_bytes)/1e6:.1f} MB), "
         f"precos_distribuicao.csv ({len(precos_dist_bytes)/1e6:.1f} MB), "
         f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB), "
-        f"procon_sp.csv ({len(procon_bytes)/1e3:.0f} KB) "
+        f"procon_sp.csv ({len(procon_bytes or b'')/1e3:.0f} KB) "
         f"e metadata.json gravados"
     )
 
