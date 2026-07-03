@@ -96,13 +96,18 @@ PRECOS_PROD_MIN_ROWS = 3_000
 # --- Reclamações Fundamentadas (PowerBI público do Procon-SP):           ---
 # --- CNPJs de empresas com reclamações de consumidores procedentes.      ---
 # Dashboard: https://www.procon.sp.gov.br/empresas-reclamadas/
-# A chave pública do relatório é estável enquanto o IPEM não republicar.
+# A chave pública do relatório é estável enquanto o Procon não republicar.
+# A API limita cada resposta a 30 mil linhas; a lista completa (~394 mil
+# CNPJs) é percorrida com os RestartTokens que a própria resposta devolve.
 RECLAMADAS_POWERBI_URL = (
     "https://wabi-brazil-south-b-primary-api.analysis.windows.net/"
     "public/reports/querydata?synchronous=true"
 )
 RECLAMADAS_RESOURCE_KEY = "7f552da0-bf9d-4c97-be36-fbea30e0dd3d"
-RECLAMADAS_MIN_CNPJS = 100  # hoje são ~30 mil; menos que isso é problema
+# Colunas de nome da tabela "account" usadas no filtro de postos fechados.
+RECLAMADAS_NAME_COLUMNS = ("Razão Social", "Nome Fantasia(Pesquisa)")
+RECLAMADAS_MIN_TOTAL = 100_000  # a lista completa tem ~394 mil CNPJs
+RECLAMADAS_MIN_FUEL = 300       # ~8 mil batem no filtro de postos
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -277,67 +282,78 @@ def _normalize_cnpj(raw: str) -> str:
     return digits.zfill(14)
 
 
-def fetch_reclamadas_procon_sp() -> bytes:
-    """Extrai CNPJs de empresas reclamadas do PowerBI público do Procon-SP
-    (Reclamações Fundamentadas). O dashboard lista empresas que tiveram
-    reclamações de consumidores registradas e julgadas procedentes.
+def _reclamadas_post(body: dict) -> dict:
+    """POST na API pública do PowerBI com retry (mesma política dos downloads
+    do gov.br: falhas transitórias não devem derrubar a coleta semanal)."""
+    payload = json.dumps(body).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "X-PowerBI-ResourceKey": RECLAMADAS_RESOURCE_KEY,
+        "User-Agent": "octano-anp-data/1.0",
+        "Origin": "https://app.powerbi.com",
+        "Referer": "https://app.powerbi.com/",
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                RECLAMADAS_POWERBI_URL, data=payload, headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.loads(response.read())
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            if attempt < 3:
+                wait = 15 * attempt
+                print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
+                time.sleep(wait)
+    raise RuntimeError(f"PowerBI Reclamadas falhou após 3 tentativas: {last_error}")
 
-    Devolve um CSV simples: CNPJ (uma coluna, um CNPJ normalizado por linha).
-    Fonte: https://www.procon.sp.gov.br/empresas-reclamadas/"""
-    print("Reclamadas Procon-SP (PowerBI): baixando todos os anos...")
-    cnpjs: set[str] = set()
 
-    current_year = datetime.now().year
-    # O cadastro começa por volta de 2018
-    for year in range(2018, current_year + 1):
-        payload_body = json.dumps({
+def _reclamadas_fetch_cnpjs(extra_where: list | None = None) -> set:
+    """Consulta a coluna account.CNPJ do relatório (agrupada, ou seja, valores
+    distintos) e devolve o conjunto de CNPJs normalizados. A API entrega no
+    máximo 30 mil linhas por resposta; quando há mais, devolve RestartTokens
+    ("RT") que retomam a listagem de onde parou — seguimos até o fim."""
+    where = [{"Condition": {"Not": {"Expression": {"In": {
+        "Expressions": [{"Column": {
+            "Expression": {"SourceRef": {"Source": "a"}},
+            "Property": "CNPJ",
+        }}],
+        "Values": [[{"Literal": {"Value": "null"}}]],
+    }}}}}]
+    where += extra_where or []
+
+    cnpjs: set = set()
+    restart_tokens = None
+    for _page in range(40):  # trava de segurança: hoje são 14 páginas
+        window: dict = {"Count": 30000}
+        if restart_tokens:
+            window["RestartTokens"] = restart_tokens
+        body = {
             "version": "1.0.0",
             "queries": [{
-                "Query": {
-                    "Commands": [{
-                        "SemanticQueryDataShapeCommand": {
-                            "Query": {
-                                "Version": 2,
-                                "From": [
-                                    {"Name": "a", "Entity": "account", "Type": 0},
-                                    {"Name": "l", "Entity": "LocalDateTable_3e2b530b-07af-4a31-b354-af98b95ab3c9", "Type": 0},
-                                ],
-                                "Select": [{
-                                    "Column": {
-                                        "Expression": {"SourceRef": {"Source": "a"}},
-                                        "Property": "CNPJ",
-                                    },
-                                    "Name": "account.CNPJ",
-                                }],
-                                "Where": [
-                                    {"Condition": {"Not": {"Expression": {"In": {
-                                        "Expressions": [{"Column": {
-                                            "Expression": {"SourceRef": {"Source": "a"}},
-                                            "Property": "CNPJ",
-                                        }}],
-                                        "Values": [[{"Literal": {"Value": "null"}}]],
-                                    }}}}},
-                                    {"Condition": {"In": {
-                                        "Expressions": [{"Column": {
-                                            "Expression": {"SourceRef": {"Source": "l"}},
-                                            "Property": "Ano",
-                                        }}],
-                                        "Values": [[{"Literal": {"Value": f"{year}L"}}]],
-                                    }}},
-                                ],
+                "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {
+                    "Query": {
+                        "Version": 2,
+                        "From": [{"Name": "a", "Entity": "account", "Type": 0}],
+                        "Select": [{
+                            "Column": {
+                                "Expression": {"SourceRef": {"Source": "a"}},
+                                "Property": "CNPJ",
                             },
-                            "Binding": {
-                                "Primary": {"Groupings": [{"Projections": [0]}]},
-                                "DataReduction": {
-                                    "DataVolume": 3,
-                                    "Primary": {"Window": {"Count": 30000}},
-                                },
-                                "Version": 1,
-                            },
-                            "ExecutionMetricsKind": 1,
-                        }
-                    }]
-                },
+                            "Name": "account.CNPJ",
+                        }],
+                        "Where": where,
+                    },
+                    "Binding": {
+                        "Primary": {"Groupings": [{"Projections": [0]}]},
+                        "DataReduction": {"DataVolume": 3, "Primary": {"Window": window}},
+                        "Version": 1,
+                    },
+                    "ExecutionMetricsKind": 1,
+                }}]},
                 "QueryId": "",
                 "ApplicationContext": {
                     "DatasetId": "5410ab72-d62e-4976-bf13-c8039a70b5ee",
@@ -349,68 +365,72 @@ def fetch_reclamadas_procon_sp() -> bytes:
             }],
             "cancelQueries": [],
             "modelId": 3819509,
-        }).encode("utf-8")
-
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "Accept": "application/json, text/plain, */*",
-            "X-PowerBI-ResourceKey": RECLAMADAS_RESOURCE_KEY,
-            "User-Agent": "octano-anp-data/1.0",
-            "Origin": "https://app.powerbi.com",
-            "Referer": "https://app.powerbi.com/",
         }
 
-        last_error: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                request = urllib.request.Request(
-                    RECLAMADAS_POWERBI_URL,
-                    data=payload_body,
-                    headers=headers,
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=120) as response:
-                    data = json.loads(response.read())
-                break
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-                if attempt < 3:
-                    wait = 15 * attempt
-                    print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
-                    time.sleep(wait)
-        else:
-            raise RuntimeError(
-                f"PowerBI Reclamadas falhou para {year} após 3 tentativas: {last_error}"
-            )
-
-        # Navega a estrutura DSR do PowerBI para extrair os CNPJs do campo "G0"
-        year_cnpjs = 0
+        data = _reclamadas_post(body)
         try:
-            results = data["results"][0]["result"]["data"]["dsr"]["DS"][0]["PH"]
-            for group in results:
-                rows = group.get("DM0", [])
-                for row in rows:
-                    raw = row.get("G0", "")
-                    if raw:
-                        normalized = _normalize_cnpj(str(raw))
-                        if normalized and len(normalized) == 14:
-                            cnpjs.add(normalized)
-                            year_cnpjs += 1
-            print(f"  - Ano {year}: {year_cnpjs} CNPJs extraídos")
+            dataset = data["results"][0]["result"]["data"]["dsr"]["DS"][0]
+            for group in dataset.get("PH", []):
+                for row in group.get("DM0", []):
+                    normalized = _normalize_cnpj(str(row.get("G0", "")))
+                    if len(normalized) == 14:
+                        cnpjs.add(normalized)
+            restart_tokens = dataset.get("RT")
         except (KeyError, IndexError, TypeError) as err:
             raise RuntimeError(
-                f"Estrutura do PowerBI mudou (ano {year}) — não foi possível extrair CNPJs: {err}"
+                f"Estrutura do PowerBI mudou — não foi possível extrair CNPJs: {err}"
             ) from err
 
-        time.sleep(1)
+        if not restart_tokens:
+            return cnpjs
+        time.sleep(0.5)
+    raise RuntimeError("PowerBI Reclamadas não terminou em 40 páginas — abortando")
 
-    print(f"Reclamadas Procon-SP: {len(cnpjs)} CNPJs extraídos")
-    if len(cnpjs) < RECLAMADAS_MIN_CNPJS:
+
+def fetch_reclamadas_procon_sp(cadastro_cnpjs: set) -> bytes:
+    """Extrai CNPJs de empresas reclamadas do PowerBI público do Procon-SP
+    (Reclamações Fundamentadas) e filtra para postos de combustível com a
+    mesma política do fetch_procon_sp: CNPJ presente no cadastro de
+    revendedores da ANP OU palavra-chave de posto no nome (razão social /
+    nome fantasia), que cobre postos já fechados fora do cadastro.
+
+    Devolve um CSV simples: CNPJ (uma coluna, um CNPJ normalizado por linha).
+    Fonte: https://www.procon.sp.gov.br/empresas-reclamadas/"""
+    print("Reclamadas Procon-SP (PowerBI): baixando lista completa de CNPJs...")
+    todos = _reclamadas_fetch_cnpjs()
+    print(f"Reclamadas Procon-SP: {len(todos)} CNPJs na lista completa")
+    if len(todos) < RECLAMADAS_MIN_TOTAL:
         raise RuntimeError(
-            f"Apenas {len(cnpjs)} CNPJs reclamados (mínimo {RECLAMADAS_MIN_CNPJS}) — abortando"
+            f"Lista completa com só {len(todos)} CNPJs (mínimo {RECLAMADAS_MIN_TOTAL}) — abortando"
         )
 
-    lines = ["CNPJ"] + sorted(cnpjs)
+    normalizado_cadastro = {_normalize_cnpj(cnpj) for cnpj in cadastro_cnpjs}
+    fuel = todos & normalizado_cadastro
+    print(f"Reclamadas Procon-SP: {len(fuel)} CNPJs no cadastro da ANP")
+
+    # Postos fechados não constam mais no cadastro: busca no servidor por
+    # palavra-chave nas colunas de nome (Contains é case-insensitive).
+    for column in RECLAMADAS_NAME_COLUMNS:
+        for keyword in PROCON_FUEL_KEYWORDS:
+            extra = [{"Condition": {"Contains": {
+                "Left": {"Column": {
+                    "Expression": {"SourceRef": {"Source": "a"}},
+                    "Property": column,
+                }},
+                "Right": {"Literal": {"Value": f"'{keyword}'"}},
+            }}}]
+            matched = _reclamadas_fetch_cnpjs(extra)
+            fuel |= matched
+            print(f"  - {column} contém {keyword!r}: {len(matched)} CNPJs")
+            time.sleep(0.5)
+
+    print(f"Reclamadas Procon-SP: {len(fuel)} postos de combustível")
+    if len(fuel) < RECLAMADAS_MIN_FUEL:
+        raise RuntimeError(
+            f"Só {len(fuel)} postos nas Reclamadas (mínimo {RECLAMADAS_MIN_FUEL}) — abortando"
+        )
+
+    lines = ["CNPJ"] + sorted(fuel)
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -604,7 +624,7 @@ def main() -> None:
 
     # Reclamações Fundamentadas (PowerBI): falha SUAVE, mesmo padrão do Procon.
     try:
-        reclamadas_bytes = fetch_reclamadas_procon_sp()
+        reclamadas_bytes = fetch_reclamadas_procon_sp(cadastro_cnpjs)
     except Exception as error:  # noqa: BLE001
         print(f"AVISO: Reclamadas Procon-SP indisponível ({error}); reutilizando a última versão")
         try:
