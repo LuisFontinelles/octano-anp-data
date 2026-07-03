@@ -35,11 +35,12 @@ jobs:
           DATA_HOJE=$(date -u +%d/%m/%Y)
           gh release upload latest data/base_anp.csv data/cadastro_postos.csv \
             data/precos_distribuicao.csv data/precos_produtores.csv \
-            data/procon_sp.csv data/reclamadas_procon_sp.csv data/metadata.json \
+            data/procon_sp.csv data/reclamadas_procon_sp.csv \
+            data/ipem_bombas_seguras.json data/metadata.json \
             --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit latest \
-            --title "Base ANP + Procon-SP (Autuações e Reclamações)" \
-            --notes "Dados públicos baixados em $DATA_HOJE: fiscalização ANP (SFI), cadastro de revendedores, preços semanais (SDL) e dados do Procon-SP (empresas autuadas e com reclamações fundamentadas)." \
+            --title "Base ANP + Procon-SP + IPEM Bombas Seguras" \
+            --notes "Dados públicos baixados em $DATA_HOJE: fiscalização ANP (SFI), cadastro de revendedores, preços semanais (SDL), Procon-SP (empresas autuadas e com reclamações fundamentadas) e IPEM-SP (postos com bombas certificadas)." \
             --repo "$GITHUB_REPOSITORY"
 
       # Além deste passo, o GitHub já envia e-mail automaticamente ao dono do

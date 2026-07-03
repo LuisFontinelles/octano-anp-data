@@ -109,6 +109,19 @@ RECLAMADAS_NAME_COLUMNS = ("Razão Social", "Nome Fantasia(Pesquisa)")
 RECLAMADAS_MIN_TOTAL = 100_000  # a lista completa tem ~394 mil CNPJs
 RECLAMADAS_MIN_FUEL = 300       # ~8 mil batem no filtro de postos
 
+# --- IPEM-SP "Bombas Seguras" (PowerBI público): postos com bombas         ---
+# --- certificadas antifraude (selo "Bombas Certificadas IPEM" do app).     ---
+# Painel: https://www.ipem.sp.gov.br/bombasegura
+# O modelo BaseSgi expõe o CNPJ do posto; filtramos por isvalid='Autorizado'.
+# Base pequena (SP inteiro tem ~200 postos), uma resposta única já cobre.
+IPEM_POWERBI_URL = RECLAMADAS_POWERBI_URL
+IPEM_RESOURCE_KEY = "82bf5d55-292e-4cf4-8fc6-61605c816c8b"
+IPEM_DATASET_ID = "8971c0f9-307b-46b8-a211-5eba41585040"
+IPEM_REPORT_ID = "eda4f821-4a5f-441c-ab5f-9a978f53a6a4"
+IPEM_VISUAL_ID = "2a7ae5e11f58d1550f50"
+IPEM_MODEL_ID = 5200277
+IPEM_MIN = 100  # jul/2026: 207 postos autorizados; menos que isso é problema
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -434,6 +447,103 @@ def fetch_reclamadas_procon_sp(cadastro_cnpjs: set) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def _ipem_post(body: dict) -> dict:
+    """POST na API pública do PowerBI do IPEM-SP com retry (mesma política do
+    _reclamadas_post, com a resource key do painel Bombas Seguras)."""
+    payload = json.dumps(body).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "X-PowerBI-ResourceKey": IPEM_RESOURCE_KEY,
+        "User-Agent": "octano-anp-data/1.0",
+        "Origin": "https://app.powerbi.com",
+        "Referer": "https://app.powerbi.com/",
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                IPEM_POWERBI_URL, data=payload, headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.loads(response.read())
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            if attempt < 3:
+                wait = 15 * attempt
+                print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
+                time.sleep(wait)
+    raise RuntimeError(f"PowerBI IPEM falhou após 3 tentativas: {last_error}")
+
+
+def fetch_ipem_bombas_seguras() -> bytes:
+    """Extrai os CNPJs dos postos com bombas certificadas (autorizadas) do
+    painel público "Bombas Seguras" do IPEM-SP e devolve um JSON: array de
+    CNPJs normalizados (14 dígitos), no formato que o IPEMProvider do app lê.
+    Fonte: https://www.ipem.sp.gov.br/bombasegura"""
+    print("IPEM Bombas Seguras (PowerBI): baixando postos autorizados...")
+    body = {
+        "version": "1.0.0",
+        "queries": [{
+            "Query": {"Commands": [{"SemanticQueryDataShapeCommand": {
+                "Query": {
+                    "Version": 2,
+                    "From": [{"Name": "b", "Entity": "BaseSgi", "Type": 0}],
+                    "Select": [{
+                        "Column": {
+                            "Expression": {"SourceRef": {"Source": "b"}},
+                            "Property": "CNPJ",
+                        },
+                        "Name": "BaseSgi.CNPJ",
+                    }],
+                    "Where": [{"Condition": {"In": {
+                        "Expressions": [{"Column": {
+                            "Expression": {"SourceRef": {"Source": "b"}},
+                            "Property": "isvalid",
+                        }}],
+                        "Values": [[{"Literal": {"Value": "'Autorizado'"}}]],
+                    }}}],
+                },
+                "Binding": {
+                    "Primary": {"Groupings": [{"Projections": [0]}]},
+                    "DataReduction": {"DataVolume": 3, "Primary": {"Window": {"Count": 5000}}},
+                    "Version": 1,
+                },
+                "ExecutionMetricsKind": 1,
+            }}]},
+            "QueryId": "",
+            "ApplicationContext": {
+                "DatasetId": IPEM_DATASET_ID,
+                "Sources": [{"ReportId": IPEM_REPORT_ID, "VisualId": IPEM_VISUAL_ID}],
+            },
+        }],
+        "cancelQueries": [],
+        "modelId": IPEM_MODEL_ID,
+    }
+
+    data = _ipem_post(body)
+    try:
+        dataset = data["results"][0]["result"]["data"]["dsr"]["DS"][0]
+    except (KeyError, IndexError, TypeError) as err:
+        raise RuntimeError(f"Estrutura do PowerBI IPEM mudou: {err}") from err
+
+    # Cada linha traz o CNPJ na chave "G0" (mesmo formato do PowerBI de
+    # reclamadas); são valores distintos, uma linha por posto autorizado.
+    cnpjs: set = set()
+    for group in dataset.get("PH", []):
+        for row in group.get("DM0", []):
+            normalized = _normalize_cnpj(str(row.get("G0", "")))
+            if len(normalized) == 14:
+                cnpjs.add(normalized)
+
+    print(f"IPEM Bombas Seguras: {len(cnpjs)} postos autorizados")
+    if len(cnpjs) < IPEM_MIN:
+        raise RuntimeError(
+            f"Só {len(cnpjs)} postos no IPEM (mínimo {IPEM_MIN}) — abortando"
+        )
+    return (json.dumps(sorted(cnpjs), ensure_ascii=False) + "\n").encode("utf-8")
+
+
 def fetch_precos_distribuicao() -> bytes:
     """Preços semanais de DISTRIBUIÇÃO (Brasil + por UF) num único CSV:
     INICIO;FIM;LOCAL;PRODUTO;UNIDADE;PRECO — LOCAL é "BRASIL" ou o nome da UF.
@@ -640,6 +750,22 @@ def main() -> None:
         reclamadas_bytes or b"CNPJ\n"
     )
 
+    # IPEM Bombas Seguras (PowerBI): falha SUAVE, mesmo padrão do Procon.
+    try:
+        ipem_bytes = fetch_ipem_bombas_seguras()
+    except Exception as error:  # noqa: BLE001
+        print(f"AVISO: IPEM Bombas Seguras indisponível ({error}); reutilizando a última versão")
+        try:
+            ipem_bytes = download(
+                "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
+                "latest/ipem_bombas_seguras.json",
+                attempts=2,
+            )
+        except Exception as fallback_error:  # noqa: BLE001
+            print(f"AVISO: fallback do IPEM também falhou ({fallback_error})")
+            ipem_bytes = None
+    (DATA_DIR / "ipem_bombas_seguras.json").write_bytes(ipem_bytes or b"[]\n")
+
     precos_dist_bytes = fetch_precos_distribuicao()
     (DATA_DIR / "precos_distribuicao.csv").write_bytes(precos_dist_bytes)
 
@@ -674,6 +800,11 @@ def main() -> None:
         metadata["reclamadasSource"] = (
             "https://www.procon.sp.gov.br/empresas-reclamadas/"
         )
+    if ipem_bytes:
+        # JSON array de CNPJs: a contagem é o tamanho do array, não linhas.
+        metadata["ipemRows"] = len(json.loads(ipem_bytes))
+        metadata["ipemSha256"] = hashlib.sha256(ipem_bytes).hexdigest()
+        metadata["ipemSource"] = "https://www.ipem.sp.gov.br/bombasegura"
     (DATA_DIR / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -683,7 +814,8 @@ def main() -> None:
         f"precos_distribuicao.csv ({len(precos_dist_bytes)/1e6:.1f} MB), "
         f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB), "
         f"procon_sp.csv ({len(procon_bytes or b'')/1e3:.0f} KB), "
-        f"reclamadas_procon_sp.csv ({len(reclamadas_bytes or b'')/1e3:.0f} KB) "
+        f"reclamadas_procon_sp.csv ({len(reclamadas_bytes or b'')/1e3:.0f} KB), "
+        f"ipem_bombas_seguras.json ({len(ipem_bytes or b'')/1e3:.0f} KB) "
         f"e metadata.json gravados"
     )
 
