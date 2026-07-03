@@ -51,6 +51,22 @@ EXPECTED_HEADER = [
 # Se a ANP publicar um arquivo muito menor, algo mudou no formato: melhor falhar.
 MIN_ROWS = 200_000
 
+# --- Procon-SP: Portal da Transparência "Empresas Autuadas" (multas com ---
+# --- processo administrativo encerrado e não pagas, por CNPJ).          ---
+# Dados públicos de transparência ativa (LAI); coleta 1x/semana, volume
+# baixo, com identificação no User-Agent. Só pessoas jurídicas.
+PROCON_SP_API = (
+    "https://sistemas.procon.sp.gov.br/transparencia/empresas_autuadas/"
+    "divida_grupo_empresa.php"
+)
+# O app só precisa de postos de combustível: filtramos por CNPJ presente no
+# cadastro de revendedores da ANP OU por palavra-chave no nome (o cadastro
+# não cobre postos já fechados, que ainda interessam ao histórico).
+PROCON_FUEL_KEYWORDS = ("POSTO", "COMBUST", "ABASTECEDORA", "CENTRO AUTOMOTIVO")
+PROCON_MIN_TOTAL = 3_000    # a lista completa tem ~5 mil empresas
+PROCON_MIN_FUEL = 300       # ~850 são postos; menos que isso é problema
+
+
 # --- Preços de DISTRIBUIÇÃO (semanal, desde ago/2020): Brasil e por UF. ---
 PRECOS_DIST_URLS = [
     ("BRASIL", "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/"
@@ -166,6 +182,79 @@ def download(url: str, attempts: int = 4) -> bytes:
                 print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
                 time.sleep(wait)
     raise RuntimeError(f"Download falhou após {attempts} tentativas: {last_error}")
+
+
+def _procon_get(params: str) -> dict:
+    payload = download(f"{PROCON_SP_API}?{params}", attempts=3)
+    data = json.loads(payload)
+    if data.get("Result") != "OK":
+        raise RuntimeError(f"Procon-SP respondeu {data.get('Result')!r} para {params}")
+    return data
+
+
+def _is_fuel_name(name: str) -> bool:
+    upper = (name or "").upper()
+    return any(keyword in upper for keyword in PROCON_FUEL_KEYWORDS)
+
+
+def fetch_procon_sp(cadastro_cnpjs: set) -> bytes:
+    """Baixa as empresas autuadas pelo Procon-SP e devolve um CSV apenas com
+    postos de combustível, uma linha por processo:
+    CNPJ;RAZAO_SOCIAL;PROCESSO;STATUS;VALOR_MULTA
+
+    Importante: o portal lista multas de processos ENCERRADOS e não pagas
+    (boa parte inscrita na Dívida Ativa) — não são meras acusações, mas o
+    app ainda assim exibe como registro público atribuído à fonte."""
+    data = _procon_get("action=lista_grupo_empresa&busca=&jtStartIndex=0&jtPageSize=20000")
+    records = data["Records"]
+    print(f"Procon-SP: {len(records)} empresas/grupos na lista")
+    if len(records) < PROCON_MIN_TOTAL:
+        raise RuntimeError(f"Procon-SP com só {len(records)} registros — abortando")
+
+    # Empresa individual: CNPJ direto. Grupo com nome de posto: expande os
+    # CNPJs dos membros (raros — hoje são ~8 grupos).
+    selected = {}  # cnpj -> nome
+    for record in records:
+        name = record.get("nome_grupo_empresa") or ""
+        cnpj = record.get("cnpj")
+        if record.get("eh_grupo") == "1":
+            if _is_fuel_name(name):
+                group = _procon_get(
+                    f"action=lista_empresas_do_grupo&id={record['id_grupo_empresa']}"
+                )
+                for member in group["Records"]:
+                    member_cnpj = member.get("cnpj")
+                    if member_cnpj:
+                        selected[member_cnpj] = member.get("fornecedor_nome") or name
+                time.sleep(0.1)
+        elif cnpj and (cnpj in cadastro_cnpjs or _is_fuel_name(name)):
+            selected[cnpj] = name
+
+    print(f"Procon-SP: {len(selected)} postos de combustível identificados")
+    if len(selected) < PROCON_MIN_FUEL:
+        raise RuntimeError(f"Só {len(selected)} postos no Procon-SP — abortando")
+
+    lines = ["CNPJ;RAZAO_SOCIAL;PROCESSO;STATUS;VALOR_MULTA"]
+    count = 0
+    for index, (cnpj, name) in enumerate(sorted(selected.items())):
+        processos = _procon_get(f"action=lista_processos_da_empresa&cnpj={cnpj}")
+        for proc in processos["Records"]:
+            def clean(value):
+                return str(value or "").replace(";", ",").replace("\n", " ").strip()
+            lines.append(";".join([
+                cnpj,
+                clean(name),
+                clean(proc.get("processo")),
+                clean(proc.get("status_nome")),
+                clean(proc.get("valor_multa")),
+            ]))
+            count += 1
+        if index % 100 == 0:
+            print(f"Procon-SP: processos de {index}/{len(selected)} postos...")
+        time.sleep(0.1)
+
+    print(f"Procon-SP: {count} processos de {len(selected)} postos")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def fetch_precos_distribuicao() -> bytes:
@@ -331,6 +420,23 @@ def main() -> None:
     cadastro_bytes = fetch_cadastro()
     (DATA_DIR / "cadastro_postos.csv").write_bytes(cadastro_bytes)
 
+    # Procon-SP falha SUAVE: se o portal estiver fora do ar, mantém a última
+    # versão publicada em vez de derrubar a atualização da ANP inteira.
+    cadastro_cnpjs = {
+        line.split(";", 1)[0]
+        for line in cadastro_bytes.decode("utf-8").splitlines()[1:]
+    }
+    try:
+        procon_bytes = fetch_procon_sp(cadastro_cnpjs)
+    except Exception as error:  # noqa: BLE001
+        print(f"AVISO: Procon-SP indisponível ({error}); reutilizando a última versão")
+        procon_bytes = download(
+            "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
+            "latest/procon_sp.csv",
+            attempts=2,
+        )
+    (DATA_DIR / "procon_sp.csv").write_bytes(procon_bytes)
+
     precos_dist_bytes = fetch_precos_distribuicao()
     (DATA_DIR / "precos_distribuicao.csv").write_bytes(precos_dist_bytes)
 
@@ -347,6 +453,9 @@ def main() -> None:
         "cadastroRows": cadastro_bytes.count(b"\n") - 1,
         "cadastroSha256": hashlib.sha256(cadastro_bytes).hexdigest(),
         "cadastroSource": "https://revendedoresapi.anp.gov.br/v1/combustivel",
+        "proconRows": procon_bytes.count(b"\n") - 1,
+        "proconSha256": hashlib.sha256(procon_bytes).hexdigest(),
+        "proconSource": "https://sistemas.procon.sp.gov.br/transparencia/empresas_autuadas/",
         "precosDistRows": precos_dist_bytes.count(b"\n") - 1,
         "precosDistSha256": hashlib.sha256(precos_dist_bytes).hexdigest(),
         "precosProdRows": precos_prod_bytes.count(b"\n") - 1,
@@ -360,7 +469,8 @@ def main() -> None:
         f"OK: base_anp.csv ({len(csv_bytes)/1e6:.1f} MB), "
         f"cadastro_postos.csv ({len(cadastro_bytes)/1e6:.1f} MB), "
         f"precos_distribuicao.csv ({len(precos_dist_bytes)/1e6:.1f} MB), "
-        f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB) "
+        f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB), "
+        f"procon_sp.csv ({len(procon_bytes)/1e3:.0f} KB) "
         f"e metadata.json gravados"
     )
 

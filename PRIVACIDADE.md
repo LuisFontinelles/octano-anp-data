@@ -34,17 +34,18 @@ Nome, e-mail, telefone, contatos, fotos, identificadores de publicidade, analyti
 
 ## 3. Dados públicos exibidos pelo app
 
-O app reproduz bases **públicas e oficiais** da ANP (fiscalização do abastecimento, cadastro de revendedores e preços) e conteúdo do Google (avaliações, notas), sempre com indicação de fonte e data.
+O app reproduz bases **públicas e oficiais** da ANP (fiscalização do abastecimento, cadastro de revendedores e preços), dos **Procons estaduais** (empresas autuadas — hoje, o Portal da Transparência do Procon-SP) e conteúdo do Google (avaliações, notas), sempre com indicação de fonte e data.
 
-- Dados de **empresas** (CNPJ, razão social) são exibidos como constam na base pública.
-- **CPFs** de revendedores pessoa física, quando presentes na base da ANP, são **mascarados** pelo app e pelo pipeline de dados — o documento completo não é redistribuído.
+- Dados de **empresas** (CNPJ, razão social) são exibidos como constam nas bases públicas.
+- **CPFs** de revendedores pessoa física, quando presentes nas bases, são **mascarados** pelo app e pelo pipeline de dados — o documento completo não é redistribuído.
+- As bases de Procons contêm apenas **pessoas jurídicas** (empresas autuadas), coletadas dos portais de transparência (Lei de Acesso à Informação).
 - As avaliações exibidas são de autoria de usuários do Google e permanecem sob responsabilidade de seus autores e da plataforma de origem.
 
 ## 4. Seus direitos (art. 18 da LGPD)
 
 Você pode solicitar confirmação de tratamento, acesso, correção ou eliminação de dados pelo e-mail acima. Na prática, como os dados ficam no seu aparelho: **desinstalar o app elimina todos os seus dados**; a permissão de localização é revogável nos Ajustes do iOS.
 
-Se você é **titular de dados presentes nas bases públicas** exibidas (ex.: revendedor pessoa física), pode nos contatar para revisão da exibição — e, quanto à base de origem, exercer seus direitos junto à ANP.
+Se você é **titular de dados presentes nas bases públicas** exibidas (ex.: revendedor pessoa física), pode nos contatar para revisão da exibição — e, quanto às bases de origem, exercer seus direitos junto à ANP ou ao Procon do seu estado.
 
 ## 5. Crianças e adolescentes
 

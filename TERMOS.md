@@ -9,6 +9,7 @@ Ao usar o Octano, você concorda com estes termos. Se não concordar, não utili
 O Octano é um aplicativo **exclusivamente informativo**. Ele reúne e exibe, em um só lugar:
 
 - registros **públicos e oficiais** da ANP (fiscalização do abastecimento, cadastro de revendedores e preços semanais), reproduzidos como constam na fonte, com indicação de origem e data da base;
+- registros **públicos e oficiais** de Procons estaduais (empresas autuadas — hoje, o Portal da Transparência da Fundação Procon-SP), igualmente reproduzidos como constam na fonte. **Uma autuação administrativa não significa condenação judicial definitiva** e pode estar em discussão — o app exibe o número do processo, a situação e o valor exatamente como publicados;
 - informações de localização, notas e avaliações fornecidas pelo **Google**;
 - preços informados voluntariamente pela **comunidade de usuários**, sempre rotulados como tal.
 
@@ -16,7 +17,7 @@ O Octano **não fiscaliza postos, não certifica combustível e não emite juíz
 
 ## 2. Cruzamento de dados e nível de confiança
 
-Associar um posto exibido no mapa (dados do Google) a um registro da ANP envolve correspondência de nome, endereço, coordenadas e CNPJ. O app **informa o nível de confiança** dessa correspondência e, quando ela não está confirmada, exibe os registros como **"a confirmar"** — sem afirmar que pertencem ao estabelecimento. Ferramentas de verificação (comparação com o CNPJ do cupom fiscal, consulta aos dados brutos e validação da comunidade) estão disponíveis na tela de detalhes.
+Associar um posto exibido no mapa (dados do Google) a um registro da ANP ou de um Procon envolve correspondência de nome, endereço, coordenadas e CNPJ. O app **informa o nível de confiança** dessa correspondência e, quando ela não está confirmada, exibe os registros como **"a confirmar"** — sem afirmar que pertencem ao estabelecimento. Ferramentas de verificação (comparação com o CNPJ do cupom fiscal, consulta aos dados brutos e validação da comunidade) estão disponíveis na tela de detalhes.
 
 ## 3. Ausência de garantia
 
@@ -24,7 +25,7 @@ As bases públicas podem conter erros, desatualizações ou registros já regula
 
 ## 4. É dono ou responsável por um posto?
 
-Se você identificar dados incorretos, cruzamento equivocado ou registro que não pertence ao seu estabelecimento, escreva para **luiaffontinelles@gmail.com** com o assunto **"Contestação de dados"**, informando o nome do posto no app, o CNPJ e o problema. O caso será analisado e, verificado o erro de correspondência, a associação será corrigida ou removida na atualização seguinte. A correção do **conteúdo** dos registros oficiais, porém, cabe à ANP — o app apenas reproduz a base pública.
+Se você identificar dados incorretos, cruzamento equivocado ou registro que não pertence ao seu estabelecimento, escreva para **luiaffontinelles@gmail.com** com o assunto **"Contestação de dados"**, informando o nome do posto no app, o CNPJ e o problema. O caso será analisado e, verificado o erro de correspondência, a associação será corrigida ou removida na atualização seguinte. A correção do **conteúdo** dos registros oficiais, porém, cabe ao órgão de origem (ANP ou Procon) — o app apenas reproduz as bases públicas.
 
 ## 5. Limitação de responsabilidade
 
