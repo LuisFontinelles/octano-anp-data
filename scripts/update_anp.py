@@ -284,116 +284,125 @@ def fetch_reclamadas_procon_sp() -> bytes:
 
     Devolve um CSV simples: CNPJ (uma coluna, um CNPJ normalizado por linha).
     Fonte: https://www.procon.sp.gov.br/empresas-reclamadas/"""
-    payload_body = json.dumps({
-        "version": "1.0.0",
-        "queries": [{
-            "Query": {
-                "Commands": [{
-                    "SemanticQueryDataShapeCommand": {
-                        "Query": {
-                            "Version": 2,
-                            "From": [
-                                {"Name": "a", "Entity": "account", "Type": 0},
-                                {"Name": "l", "Entity": "LocalDateTable_3e2b530b-07af-4a31-b354-af98b95ab3c9", "Type": 0},
-                            ],
-                            "Select": [{
-                                "Column": {
-                                    "Expression": {"SourceRef": {"Source": "a"}},
-                                    "Property": "CNPJ",
-                                },
-                                "Name": "account.CNPJ",
-                            }],
-                            "Where": [
-                                {"Condition": {"Not": {"Expression": {"In": {
-                                    "Expressions": [{"Column": {
+    print("Reclamadas Procon-SP (PowerBI): baixando todos os anos...")
+    cnpjs: set[str] = set()
+
+    current_year = datetime.now().year
+    # O cadastro começa por volta de 2018
+    for year in range(2018, current_year + 1):
+        payload_body = json.dumps({
+            "version": "1.0.0",
+            "queries": [{
+                "Query": {
+                    "Commands": [{
+                        "SemanticQueryDataShapeCommand": {
+                            "Query": {
+                                "Version": 2,
+                                "From": [
+                                    {"Name": "a", "Entity": "account", "Type": 0},
+                                    {"Name": "l", "Entity": "LocalDateTable_3e2b530b-07af-4a31-b354-af98b95ab3c9", "Type": 0},
+                                ],
+                                "Select": [{
+                                    "Column": {
                                         "Expression": {"SourceRef": {"Source": "a"}},
                                         "Property": "CNPJ",
-                                    }}],
-                                    "Values": [[{"Literal": {"Value": "null"}}]],
-                                }}}}},
-                                {"Condition": {"In": {
-                                    "Expressions": [{"Column": {
-                                        "Expression": {"SourceRef": {"Source": "l"}},
-                                        "Property": "Ano",
-                                    }}],
-                                    "Values": [[{"Literal": {"Value": "2025L"}}]],
-                                }}},
-                            ],
-                        },
-                        "Binding": {
-                            "Primary": {"Groupings": [{"Projections": [0]}]},
-                            "DataReduction": {
-                                "DataVolume": 3,
-                                "Primary": {"Window": {"Count": 30000}},
+                                    },
+                                    "Name": "account.CNPJ",
+                                }],
+                                "Where": [
+                                    {"Condition": {"Not": {"Expression": {"In": {
+                                        "Expressions": [{"Column": {
+                                            "Expression": {"SourceRef": {"Source": "a"}},
+                                            "Property": "CNPJ",
+                                        }}],
+                                        "Values": [[{"Literal": {"Value": "null"}}]],
+                                    }}}}},
+                                    {"Condition": {"In": {
+                                        "Expressions": [{"Column": {
+                                            "Expression": {"SourceRef": {"Source": "l"}},
+                                            "Property": "Ano",
+                                        }}],
+                                        "Values": [[{"Literal": {"Value": f"{year}L"}}]],
+                                    }}},
+                                ],
                             },
-                            "Version": 1,
-                        },
-                        "ExecutionMetricsKind": 1,
-                    }
-                }]
-            },
-            "QueryId": "",
-            "ApplicationContext": {
-                "DatasetId": "5410ab72-d62e-4976-bf13-c8039a70b5ee",
-                "Sources": [{
-                    "ReportId": "98fdc96d-085b-4ca1-ac68-d29bfed78e8f",
-                    "VisualId": "3e04fd14718d00c9ce9d",
-                }],
-            },
-        }],
-        "cancelQueries": [],
-        "modelId": 3819509,
-    }).encode("utf-8")
+                            "Binding": {
+                                "Primary": {"Groupings": [{"Projections": [0]}]},
+                                "DataReduction": {
+                                    "DataVolume": 3,
+                                    "Primary": {"Window": {"Count": 30000}},
+                                },
+                                "Version": 1,
+                            },
+                            "ExecutionMetricsKind": 1,
+                        }
+                    }]
+                },
+                "QueryId": "",
+                "ApplicationContext": {
+                    "DatasetId": "5410ab72-d62e-4976-bf13-c8039a70b5ee",
+                    "Sources": [{
+                        "ReportId": "98fdc96d-085b-4ca1-ac68-d29bfed78e8f",
+                        "VisualId": "3e04fd14718d00c9ce9d",
+                    }],
+                },
+            }],
+            "cancelQueries": [],
+            "modelId": 3819509,
+        }).encode("utf-8")
 
-    headers = {
-        "Content-Type": "application/json;charset=UTF-8",
-        "Accept": "application/json, text/plain, */*",
-        "X-PowerBI-ResourceKey": RECLAMADAS_RESOURCE_KEY,
-        "User-Agent": "octano-anp-data/1.0",
-        "Origin": "https://app.powerbi.com",
-        "Referer": "https://app.powerbi.com/",
-    }
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "Accept": "application/json, text/plain, */*",
+            "X-PowerBI-ResourceKey": RECLAMADAS_RESOURCE_KEY,
+            "User-Agent": "octano-anp-data/1.0",
+            "Origin": "https://app.powerbi.com",
+            "Referer": "https://app.powerbi.com/",
+        }
 
-    print("Reclamadas Procon-SP (PowerBI): baixando...")
-    last_error: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            request = urllib.request.Request(
-                RECLAMADAS_POWERBI_URL,
-                data=payload_body,
-                headers=headers,
-                method="POST",
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                request = urllib.request.Request(
+                    RECLAMADAS_POWERBI_URL,
+                    data=payload_body,
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    data = json.loads(response.read())
+                break
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+                if attempt < 3:
+                    wait = 15 * attempt
+                    print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
+                    time.sleep(wait)
+        else:
+            raise RuntimeError(
+                f"PowerBI Reclamadas falhou para {year} após 3 tentativas: {last_error}"
             )
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = json.loads(response.read())
-            break
-        except Exception as error:  # noqa: BLE001
-            last_error = error
-            if attempt < 3:
-                wait = 15 * attempt
-                print(f"Tentativa {attempt} falhou ({error}); nova em {wait}s...")
-                time.sleep(wait)
-    else:
-        raise RuntimeError(
-            f"PowerBI Reclamadas falhou após 3 tentativas: {last_error}"
-        )
 
-    # Navega a estrutura DSR do PowerBI para extrair os CNPJs do campo "G0"
-    cnpjs: set[str] = set()
-    try:
-        results = data["results"][0]["result"]["data"]["dsr"]["DS"][0]["PH"]
-        for group in results:
-            rows = group.get("DM0", [])
-            for row in rows:
-                raw = row.get("G0", "")
-                if raw:
-                    normalized = _normalize_cnpj(str(raw))
-                    if normalized and len(normalized) == 14:
-                        cnpjs.add(normalized)
-    except (KeyError, IndexError, TypeError) as err:
-        raise RuntimeError(
-            f"Estrutura do PowerBI mudou — não foi possível extrair CNPJs: {err}"
-        ) from err
+        # Navega a estrutura DSR do PowerBI para extrair os CNPJs do campo "G0"
+        year_cnpjs = 0
+        try:
+            results = data["results"][0]["result"]["data"]["dsr"]["DS"][0]["PH"]
+            for group in results:
+                rows = group.get("DM0", [])
+                for row in rows:
+                    raw = row.get("G0", "")
+                    if raw:
+                        normalized = _normalize_cnpj(str(raw))
+                        if normalized and len(normalized) == 14:
+                            cnpjs.add(normalized)
+                            year_cnpjs += 1
+            print(f"  - Ano {year}: {year_cnpjs} CNPJs extraídos")
+        except (KeyError, IndexError, TypeError) as err:
+            raise RuntimeError(
+                f"Estrutura do PowerBI mudou (ano {year}) — não foi possível extrair CNPJs: {err}"
+            ) from err
+
+        time.sleep(1)
 
     print(f"Reclamadas Procon-SP: {len(cnpjs)} CNPJs extraídos")
     if len(cnpjs) < RECLAMADAS_MIN_CNPJS:
