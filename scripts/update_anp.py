@@ -15,6 +15,7 @@ import json
 import sys
 import time
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -121,6 +122,30 @@ IPEM_REPORT_ID = "eda4f821-4a5f-441c-ab5f-9a978f53a6a4"
 IPEM_VISUAL_ID = "2a7ae5e11f58d1550f50"
 IPEM_MODEL_ID = 5200277
 IPEM_MIN = 100  # jul/2026: 207 postos autorizados; menos que isso é problema
+
+# --- SINDEC: Cadastro Nacional de Reclamações Fundamentadas (Senacon).      ---
+# --- Reclamações fundamentadas de TODOS os Procons do Brasil (o do DF       ---
+# --- incluso), por CNPJ, com CNAE e status de atendimento. Filtramos postos ---
+# --- de combustível (CNAE 4731* ou palavra-chave) e agregamos por CNPJ com  ---
+# --- índice de resolutividade (atendidas / total).                          ---
+# Fonte: https://dados.mj.gov.br/dataset/cadastro-nacional-de-reclamacoes-fundamentadas-procons-sindec
+# Um recurso (URL) por ano; o formato varia (CSV direto, CSV/XLSX em zip).
+_SINDEC_BASE = ("https://dados.mj.gov.br/dataset/"
+                "8ff7032a-d6db-452b-89f1-d860eb6965ff/resource")
+SINDEC_YEARS = {
+    2015: f"{_SINDEC_BASE}/f9d3a86b-2f58-435e-a100-77926af0469a/download/reclamacoes-fundamentadas-sindec-2015.zip",
+    2016: f"{_SINDEC_BASE}/4d055554-0595-47ce-b3d4-97c11f33e143/download/reclamacoes-fundamentadas-sindec-2016v2.zip",
+    2017: f"{_SINDEC_BASE}/8d400ac5-6aad-4ad9-a33a-74ca40f2242e/download/cnrf2017.zip",
+    2018: f"{_SINDEC_BASE}/a37f1be2-bdb0-4191-9563-015a40e65434/download/reclamacoes-fundamentadas-2018-em-zip.zip",
+    2019: f"{_SINDEC_BASE}/c2cce323-24c2-4430-8918-e24b2966213c/download/crf2019-dados-abertos.zip",
+    2020: f"{_SINDEC_BASE}/094e22a2-82f0-448f-b377-1985cbe99ec8/download/cnrf2020.zip",
+    2021: f"{_SINDEC_BASE}/a709fa60-00d2-47db-a86a-97eb10fa62ff/download/cnrf2021.csv",
+    2022: f"{_SINDEC_BASE}/bc23b54c-18e7-4ed8-b7f5-205434ac5719/download/crf2022dados-abertos.csv",
+    2023: f"{_SINDEC_BASE}/e0c5eaea-ace1-457d-a945-9645644d2783/download/cnrf2023dadosabertos.zip",
+    2024: f"{_SINDEC_BASE}/34a47b5c-5577-421a-bf9b-2dbbfc371d65/download/cnrfdadosabertos2024.zip",
+}
+SINDEC_FUEL_KEYWORDS = ("POSTO", "COMBUST", "DERIVADOS DE PETROLEO", "ABASTEC")
+SINDEC_MIN = 500  # nacional, 2015+: alguns milhares de postos; menos é problema
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -544,6 +569,118 @@ def fetch_ipem_bombas_seguras() -> bytes:
     return (json.dumps(sorted(cnpjs), ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _sindec_iter_rows(data: bytes, name: str):
+    """Gera dicts {coluna: valor} de um arquivo do SINDEC, tratando as três
+    formas em que a Senacon publica: CSV direto, CSV dentro de zip e XLSX
+    dentro de zip. Encoding do CSV: utf-8 (com BOM) ou latin-1."""
+    lower = name.lower()
+    if lower.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for member in archive.namelist():
+                if member.endswith("/"):
+                    continue
+                yield from _sindec_iter_rows(archive.read(member), member)
+        return
+    if lower.endswith(".csv"):
+        text = None
+        for encoding in ("utf-8-sig", "latin-1"):
+            try:
+                text = data.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        reader = csv.DictReader(io.StringIO(text or ""), delimiter=";")
+        reader.fieldnames = [(fn or "").lstrip("﻿") for fn in (reader.fieldnames or [])]
+        yield from reader
+        return
+    if lower.endswith(".xlsx"):
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        sheet = workbook.worksheets[0]
+        rows = sheet.iter_rows(values_only=True)
+        header = [
+            (str(cell).strip().lstrip("﻿") if cell is not None else "")
+            for cell in next(rows)
+        ]
+        for row in rows:
+            yield {
+                col: (row[i] if i < len(row) else None)
+                for i, col in enumerate(header)
+            }
+
+
+def fetch_reclamadas_sindec() -> bytes:
+    """Baixa o Cadastro Nacional de Reclamações Fundamentadas (SINDEC/Senacon)
+    de vários anos, filtra postos de combustível (CNAE 4731* ou palavra-chave
+    no nome) e agrega por CNPJ, devolvendo um CSV nacional:
+    CNPJ;RAZAO_SOCIAL;UFS;ATENDIDAS;NAO_ATENDIDAS;TOTAL;RESOLUTIVIDADE
+
+    RESOLUTIVIDADE = atendidas / total (em %), o mesmo índice que os Procons
+    publicam. Cobre todos os estados; o Procon-DF entra como parte do SINDEC.
+    Fonte: dados.mj.gov.br (Ministério da Justiça)."""
+    # cnpj -> [atendidas, nao_atendidas, nome, {UFs}]
+    agg: dict = {}
+    for year, url in sorted(SINDEC_YEARS.items()):
+        print(f"SINDEC {year}: baixando...")
+        try:
+            payload = download(url, attempts=3)
+        except Exception as error:  # noqa: BLE001 - um ano fora não derruba o resto
+            print(f"AVISO: SINDEC {year} indisponível ({error}); pulando o ano")
+            continue
+
+        total = fuel = 0
+        for row in _sindec_iter_rows(payload, url):
+            total += 1
+            cnae = "".join(ch for ch in str(row.get("CNAEPrincipal") or "") if ch.isdigit())
+            razao = str(row.get("strRazaoSocial") or "")
+            fantasia = str(row.get("strNomeFantasia") or "")
+            is_fuel = cnae.startswith("4731") or any(
+                keyword in (razao + fantasia).upper() for keyword in SINDEC_FUEL_KEYWORDS
+            )
+            if not is_fuel:
+                continue
+
+            cnpj = _normalize_cnpj(str(row.get("NumeroCNPJ") or ""))
+            # Descarta CNPJ inválido/zerado (a base traz alguns "00000000000000").
+            if len(cnpj) != 14 or int(cnpj) < 1_000_000:
+                continue
+            fuel += 1
+
+            record = agg.setdefault(cnpj, [0, 0, "", set()])
+            if str(row.get("Atendida") or "").strip().upper() == "S":
+                record[0] += 1
+            else:
+                record[1] += 1
+            record[2] = razao or fantasia or record[2]
+            uf = str(row.get("UF") or "").strip().upper()
+            if uf:
+                record[3].add(uf)
+        print(f"SINDEC {year}: {total} reclamações, {fuel} de postos")
+
+    print(f"SINDEC: {len(agg)} postos distintos com reclamação fundamentada")
+    if len(agg) < SINDEC_MIN:
+        raise RuntimeError(
+            f"Só {len(agg)} postos no SINDEC (mínimo {SINDEC_MIN}) — abortando"
+        )
+
+    def clean(value: str) -> str:
+        return str(value or "").replace(";", ",").replace("\n", " ").strip()
+
+    lines = ["CNPJ;RAZAO_SOCIAL;UFS;ATENDIDAS;NAO_ATENDIDAS;TOTAL;RESOLUTIVIDADE"]
+    for cnpj, (atendidas, nao, nome, ufs) in sorted(agg.items()):
+        total = atendidas + nao
+        resolutividade = (100.0 * atendidas / total) if total else 0.0
+        lines.append(";".join([
+            cnpj,
+            clean(nome),
+            "/".join(sorted(ufs)),
+            str(atendidas),
+            str(nao),
+            str(total),
+            f"{resolutividade:.1f}",
+        ]))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def fetch_precos_distribuicao() -> bytes:
     """Preços semanais de DISTRIBUIÇÃO (Brasil + por UF) num único CSV:
     INICIO;FIM;LOCAL;PRODUTO;UNIDADE;PRECO — LOCAL é "BRASIL" ou o nome da UF.
@@ -766,6 +903,24 @@ def main() -> None:
             ipem_bytes = None
     (DATA_DIR / "ipem_bombas_seguras.json").write_bytes(ipem_bytes or b"[]\n")
 
+    # Reclamações Fundamentadas SINDEC (nacional): falha SUAVE, mesmo padrão.
+    try:
+        sindec_bytes = fetch_reclamadas_sindec()
+    except Exception as error:  # noqa: BLE001
+        print(f"AVISO: SINDEC indisponível ({error}); reutilizando a última versão")
+        try:
+            sindec_bytes = download(
+                "https://github.com/LuisFontinelles/octano-anp-data/releases/download/"
+                "latest/reclamadas_sindec.csv",
+                attempts=2,
+            )
+        except Exception as fallback_error:  # noqa: BLE001
+            print(f"AVISO: fallback do SINDEC também falhou ({fallback_error})")
+            sindec_bytes = None
+    (DATA_DIR / "reclamadas_sindec.csv").write_bytes(
+        sindec_bytes or b"CNPJ;RAZAO_SOCIAL;UFS;ATENDIDAS;NAO_ATENDIDAS;TOTAL;RESOLUTIVIDADE\n"
+    )
+
     precos_dist_bytes = fetch_precos_distribuicao()
     (DATA_DIR / "precos_distribuicao.csv").write_bytes(precos_dist_bytes)
 
@@ -805,6 +960,13 @@ def main() -> None:
         metadata["ipemRows"] = len(json.loads(ipem_bytes))
         metadata["ipemSha256"] = hashlib.sha256(ipem_bytes).hexdigest()
         metadata["ipemSource"] = "https://www.ipem.sp.gov.br/bombasegura"
+    if sindec_bytes:
+        metadata["sindecRows"] = sindec_bytes.count(b"\n") - 1
+        metadata["sindecSha256"] = hashlib.sha256(sindec_bytes).hexdigest()
+        metadata["sindecSource"] = (
+            "https://dados.mj.gov.br/dataset/"
+            "cadastro-nacional-de-reclamacoes-fundamentadas-procons-sindec"
+        )
     (DATA_DIR / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -815,7 +977,8 @@ def main() -> None:
         f"precos_produtores.csv ({len(precos_prod_bytes)/1e6:.1f} MB), "
         f"procon_sp.csv ({len(procon_bytes or b'')/1e3:.0f} KB), "
         f"reclamadas_procon_sp.csv ({len(reclamadas_bytes or b'')/1e3:.0f} KB), "
-        f"ipem_bombas_seguras.json ({len(ipem_bytes or b'')/1e3:.0f} KB) "
+        f"ipem_bombas_seguras.json ({len(ipem_bytes or b'')/1e3:.0f} KB), "
+        f"reclamadas_sindec.csv ({len(sindec_bytes or b'')/1e3:.0f} KB) "
         f"e metadata.json gravados"
     )
 
